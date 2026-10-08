@@ -209,7 +209,9 @@ Migrations
 Models
 ~~~~~~
 
-* ...
+* The new :meth:`.QuerySet.keyset_iterator` and :meth:`.QuerySet.akeyset_iterator`
+  methods iterate over a ``QuerySet`` using one short query per chunk, without
+  a server-side cursor.
 
 Requests and Responses
 ~~~~~~~~~~~~~~~~~~~~~~

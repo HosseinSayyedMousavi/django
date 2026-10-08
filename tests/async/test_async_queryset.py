@@ -88,6 +88,34 @@ class AsyncQuerySetTest(TestCase):
                 async for m in qs:
                     pass
 
+    async def test_akeyset_iterator(self):
+        for chunk_size in (1, 2, 3, 4):
+            with self.subTest(chunk_size=chunk_size):
+                results = [
+                    m
+                    async for m in SimpleModel.objects.order_by(
+                        "-field"
+                    ).akeyset_iterator(chunk_size)
+                ]
+                self.assertEqual(results, [self.s3, self.s2, self.s1])
+
+    async def test_akeyset_iterator_prefetch_related(self):
+        results = [
+            s.prefetched_relatedmodel
+            async for s in SimpleModel.objects.prefetch_related(
+                Prefetch("relatedmodel_set", to_attr="prefetched_relatedmodel")
+            ).akeyset_iterator(2)
+        ]
+        self.assertEqual(results, [[self.r1], [self.r2], [self.r3]])
+
+    async def test_akeyset_iterator_invalid_chunk_size(self):
+        msg = "Chunk size must be strictly positive."
+        for size in [0, -1]:
+            qs = SimpleModel.objects.akeyset_iterator(chunk_size=size)
+            with self.subTest(size=size), self.assertRaisesMessage(ValueError, msg):
+                async for m in qs:
+                    pass
+
     async def test_acount(self):
         count = await SimpleModel.objects.acount()
         self.assertEqual(count, 3)

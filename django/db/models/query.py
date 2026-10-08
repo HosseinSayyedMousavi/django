@@ -680,6 +680,135 @@ class QuerySet(AltersData):
                 async for item in iterator:
                     yield item
 
+    def keyset_iterator(self, chunk_size):
+        """
+        An iterator over the results of this QuerySet that issues one short
+        query per chunk of chunk_size objects (keyset pagination) instead of
+        holding a single cursor open. The QuerySet's ordering is used, with the
+        primary key as a final tie-breaker.
+        """
+        ordering = self._get_keyset_ordering(chunk_size)
+        return self._keyset_iterator(ordering, chunk_size)
+
+    async def akeyset_iterator(self, chunk_size):
+        ordering = self._get_keyset_ordering(chunk_size)
+        last_values = None
+        while True:
+            chunk = await sync_to_async(self._next_keyset_chunk)(
+                ordering, last_values, chunk_size
+            )
+            is_full = len(chunk) == chunk_size
+            if is_full:
+                last_values = [getattr(chunk[-1], attr) for _, attr, _ in ordering]
+            # Pop so that consumed objects can be freed before the next chunk.
+            chunk.reverse()
+            while chunk:
+                yield chunk.pop()
+            if not is_full:
+                return
+
+    def _keyset_iterator(self, ordering, chunk_size):
+        last_values = None
+        while True:
+            chunk = self._next_keyset_chunk(ordering, last_values, chunk_size)
+            is_full = len(chunk) == chunk_size
+            if is_full:
+                last_values = [getattr(chunk[-1], attr) for _, attr, _ in ordering]
+            # Pop so that consumed objects can be freed before the next chunk.
+            chunk.reverse()
+            while chunk:
+                yield chunk.pop()
+            if not is_full:
+                return
+
+    def _next_keyset_chunk(self, ordering, last_values, chunk_size):
+        # Prefetching and select_related() apply to each chunk as for any other
+        # evaluated QuerySet.
+        queryset = self.order_by(
+            *[("-" if descending else "") + name for name, _, descending in ordering]
+        )
+        if last_values is not None:
+            # Rows strictly after the last ones, e.g. for (a, pk):
+            # a > last.a OR (a = last.a AND pk > last.pk)
+            condition = Q()
+            equal = {}
+            for (name, _, descending), value in zip(ordering, last_values):
+                lookup = "lt" if descending else "gt"
+                condition |= Q(**equal, **{f"{name}__{lookup}": value})
+                equal[name] = value
+            queryset = queryset.filter(condition)
+        return list(queryset[:chunk_size])
+
+    def _get_keyset_ordering(self, chunk_size):
+        """
+        Validate the QuerySet and return its ordering as a list of
+        (field name, instance attribute, descending) tuples ending with the
+        primary key.
+        """
+        if chunk_size <= 0:
+            raise ValueError("Chunk size must be strictly positive.")
+        self._not_support_combined_queries("keyset_iterator")
+        if self._fields is not None:
+            raise TypeError(
+                "Cannot call keyset_iterator() after .values() or .values_list()."
+            )
+        if self.query.is_sliced:
+            raise TypeError(
+                "Cannot call keyset_iterator() once a slice has been taken."
+            )
+        if self.query.distinct_fields:
+            raise TypeError("Cannot call keyset_iterator() after .distinct(*fields).")
+
+        msg = (
+            "keyset_iterator() only supports ordering by non-nullable fields of "
+            "the model."
+        )
+        query = self.query
+        if query.extra_order_by:
+            raise NotSupportedError(msg)
+        terms = query.order_by
+        if not terms and query.default_ordering and not query.group_by:
+            terms = query.get_meta().ordering
+        opts = self.model._meta
+        ordering = []
+        has_pk = False
+        for term in terms:
+            descending = False
+            if isinstance(term, OrderBy):
+                if term.nulls_first or term.nulls_last:
+                    raise NotSupportedError(msg)
+                descending = term.descending
+                term = term.expression
+            if isinstance(term, F):
+                name = term.name
+            elif isinstance(term, str):
+                if term.startswith("-"):
+                    descending = True
+                    term = term.removeprefix("-")
+                name = term
+            else:
+                raise NotSupportedError(msg)
+            if any(name == seen for seen, _, _ in ordering):
+                continue
+            if name == "pk":
+                field, attr = opts.pk, "pk"
+            else:
+                try:
+                    field = opts.get_field(name)
+                except exceptions.FieldDoesNotExist:
+                    raise NotSupportedError(msg)
+                # Ordering by a relation uses the related model's ordering.
+                if not field.concrete or (field.remote_field and name == field.name):
+                    raise NotSupportedError(msg)
+                attr = field.attname
+            if field.null:
+                raise NotSupportedError(msg)
+            has_pk = has_pk or field is opts.pk
+            ordering.append((name, attr, descending))
+        if not has_pk:
+            ordering.append(("pk", "pk", False))
+        return ordering
+
     def aggregate(self, *args, **kwargs):
         """
         Return a dictionary containing the calculations (aggregation)

@@ -2734,6 +2734,68 @@ value for ``chunk_size`` will result in Django using an implicit default of
     between the number of rows transferred and the data discarded if the loop
     is exited early.
 
+``keyset_iterator()``
+~~~~~~~~~~~~~~~~~~~~~
+
+.. method:: keyset_iterator(chunk_size)
+.. method:: akeyset_iterator(chunk_size)
+
+*Asynchronous version*: ``akeyset_iterator()``
+
+.. versionadded:: 6.2
+
+Returns an :term:`python:iterator` over the results, or an
+:term:`python:asynchronous iterator` if you call its asynchronous version
+``akeyset_iterator``, like :meth:`iterator`. Instead of keeping one query (and,
+on some databases, a server-side cursor) open for the whole iteration, it runs
+one short query per chunk of ``chunk_size`` objects (`keyset pagination`_),
+using the ordering values of the last object of the previous chunk to find the
+next one. For a ``QuerySet`` ordered by ``name``, each query looks like::
+
+    SELECT ... WHERE name > <last name> OR (name = <last name> AND pk > <last pk>)
+    ORDER BY name, pk LIMIT <chunk_size>
+
+The ``QuerySet``'s :meth:`order_by` (or
+:attr:`Meta.ordering <django.db.models.Options.ordering>`) is used, with the
+primary key appended as a final tie-breaker so that the order is total.
+Ascending and descending terms can be mixed.
+
+If the ordering columns are indexed (ideally together with the primary key),
+the cost of fetching a chunk doesn't grow as the iteration progresses. Without
+a suitable index, the database has to scan and sort the remaining rows for every
+chunk, which can be slower than :meth:`iterator`. No server-side cursor or
+long-lived transaction is required, so this method works with
+:ref:`transaction pooling <transaction-pooling-server-side-cursors>` and
+doesn't hit PostgreSQL's :ref:`cursor query planning assumptions
+<postgresql-server-side-cursors>` on large tables.
+
+``chunk_size`` is required and must be positive. Each chunk is evaluated as a
+regular ``QuerySet``, so :meth:`select_related` and :meth:`prefetch_related`
+are applied to each chunk and ``chunk_size`` also controls how many objects
+are prefetched at once.
+
+Differences from :meth:`iterator`:
+
+* Each chunk is a separate query, so the results aren't read from a single
+  consistent snapshot unless the calls are wrapped in a transaction with a
+  suitable isolation level. Objects created, deleted or modified during the
+  iteration may or may not be returned.
+* One additional query is performed if the number of results is a multiple of
+  ``chunk_size``.
+
+The ordering can only refer to non-nullable concrete fields of the model (or
+``pk``), optionally with ``-`` or :class:`~django.db.models.F` expressions
+using ``asc()``/``desc()``. :exc:`~django.db.NotSupportedError` is raised for
+other orderings such as ``"?"``, annotations, expressions, related fields,
+nullable fields, ``nulls_first``/``nulls_last`` and :meth:`extra` ordering.
+
+``TypeError`` is raised if the ``QuerySet`` was sliced, uses
+``distinct(*fields)``, or follows :meth:`values` or :meth:`values_list`.
+:exc:`~django.db.NotSupportedError` is raised after :meth:`union`,
+:meth:`intersection` or :meth:`difference`.
+
+.. _keyset pagination: https://use-the-index-luke.com/no-offset
+
 ``latest()``
 ~~~~~~~~~~~~
 

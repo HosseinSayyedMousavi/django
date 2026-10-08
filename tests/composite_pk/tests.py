@@ -250,6 +250,21 @@ class CompositePKTests(TestCase):
         result = list(Comment.objects.iterator())
         self.assertEqual(result, [self.comment])
 
+    def test_keyset_iterator(self):
+        comments = [
+            Comment.objects.create(tenant=self.tenant, id=id_) for id_ in (2, 3, 4)
+        ]
+        expected = sorted([self.comment, *comments], key=lambda c: c.pk)
+        for chunk_size in (1, 2, 4):
+            with self.subTest(chunk_size=chunk_size):
+                self.assertEqual(
+                    list(Comment.objects.keyset_iterator(chunk_size)), expected
+                )
+                self.assertEqual(
+                    list(Comment.objects.order_by("-pk").keyset_iterator(chunk_size)),
+                    expected[::-1],
+                )
+
     def test_query(self):
         users = User.objects.values_list("pk").order_by("pk")
         self.assertNotIn('AS "pk"', str(users.query))
